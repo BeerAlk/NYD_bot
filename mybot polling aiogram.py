@@ -4,21 +4,15 @@ import aiohttp
 import asyncio
 import asyncpg
 from aiogram import Bot, Dispatcher, types, F
+from aiogram import types
 from aiogram import Router
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.filters import Command
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, ChatJoinRequest
 from aiocron import crontab
-from aiohttp import web
 from db import database, load_subscribers_db, add_user_to_subscribers_db, remove_user_from_subscribers_db
 
-# Конфигурация
 API_TOKEN = '7415146600:AAFvHQt3Kkr0_XIFYM2mPfea-ZqRG8NulZc'
-# Подставляем ваш публичный домен, полученный на PythonAnywhere:
-WEBHOOK_HOST = 'https://shy-leaf-f5f6.skat21-90.workers.dev'
-WEBHOOK_PATH = '/webhook'
-WEBHOOK_URL = f"{WEBHOOK_HOST}{WEBHOOK_PATH}"
-
 main_channel_url = "https://t.me/not_yet_design"
 main_channel_id = -1001844574074
 closed_channel_link = "https://t.me/+Ek0Zwec_-ghhMTcy"
@@ -33,17 +27,35 @@ router = Router()
 dp = Dispatcher(bot=bot, storage=storage)
 dp.include_router(router)
 
-# Пример обработчика для необработанных сообщений (отладка)
-@router.message()
-async def catch_all_messages(message: types.Message):
-    logging.warning(f"Необработанное сообщение: {message}")
+async def test_connect():
+    conn = await asyncpg.connect(user='NYD_ADMIN',
+                                 password='fg4xZ9H4vu',
+                                 database='subscribers',
+                                 host='127.0.0.1',
+                                 port=5432)
+    print("Соединение установлено!")
+    await conn.close()
 
-# Функция проверки подписки (без изменений)
+asyncio.run(test_connect())
+
+# Удаление Webhook при запуске
+async def delete_webhook():
+    async with aiohttp.ClientSession() as session:
+        url = f'https://api.telegram.org/bot{API_TOKEN}/deleteWebhook'
+        async with session.get(url) as response:
+            return await response.json()
+        
+asyncio.run(delete_webhook())
+logging.info("Webhook удален.")
+
 async def check_subscription(user_id):
     try:
+        # Проверяем подписку на основной канал
         member = await bot.get_chat_member(main_channel_id, user_id)
         if member.status not in ["member", "administrator", "creator"]:
             return False
+        # Проверяем подписку на бота.
+        # Если пользователь никогда не взаимодействовал с ботом, этот вызов может вызвать исключение.
         bot_member = await bot.get_chat_member(user_id, user_id)
         if bot_member.status != "member":
             return False
@@ -55,7 +67,11 @@ async def check_subscription(user_id):
 def is_admin(message: types.Message):
     return message.from_user.id == ADMIN_ID
 
-# Обработчик заявок на вступление в закрытую группу
+@router.message()
+async def catch_all_messages(message: types.Message):
+    logging.warning(f"Необработанное сообщение: {message}")
+    
+# Обработчик заявок на вступление (принимает только подписанных пользователей)
 @dp.chat_join_request(F.chat.id == closed_group_chat)
 async def handle_join_request(request: ChatJoinRequest):
     user_id = request.from_user.id
@@ -82,7 +98,7 @@ async def start_command(message: types.Message):
         reply_markup=keyboard
     )
 
-# Обработчик callback для проверки подписки
+# Обработчик callback для проверки подписки (используем lambda-фильтр)
 @dp.callback_query(lambda c: c.data == "check_subscription")
 async def check_subscription_callback(callback_query: types.CallbackQuery):
     logging.info(f"Callback получен: {callback_query.data} от пользователя {callback_query.from_user.id}")
@@ -97,13 +113,12 @@ async def check_subscription_callback(callback_query: types.CallbackQuery):
     else:
         await callback_query.answer("Вы ещё не подписаны на основной канал.", show_alert=True)
 
-# Обработчик новых участников в группе
 @dp.chat_member()
 async def handle_new_chat_members(event: types.ChatMemberUpdated):
     if event.new_chat_member:
         logging.info(f"Новый участник в группе: {event.new_chat_member.user.id} ({event.new_chat_member.user.first_name})")
 
-# Обработчик команды /post для публикации постов
+# Обработчик команды /post для публикации постов в основном канале
 @dp.message(Command("post"))
 async def post_command(message: types.Message):
     if message.from_user.id != ADMIN_ID:
@@ -154,11 +169,15 @@ async def post_command(message: types.Message):
     except Exception as e:
         logging.error(f"Ошибка при публикации поста: {e}")
 
-# Обработчик новых постов в канале (рассылка подписчикам)
+
+# Обработчик новых постов в канале – рассылка подписчикам
+
+# Глобальный словарь для отслеживания обработанных media_group_id
 processed_media_groups = {}
 
 @dp.channel_post()
 async def channel_post_handler(message: types.Message):
+    # Если сообщение является частью медиа-группы
     if message.media_group_id:
         if message.media_group_id in processed_media_groups:
             logging.info(f"Media group {message.media_group_id} уже обработан, пропускаем сообщение {message.message_id}")
@@ -180,7 +199,8 @@ async def channel_post_handler(message: types.Message):
     except Exception as e:
         logging.error(f"Ошибка обработки поста из канала: {e}")
 
-# Обработчик команды /check_users для проверки подписчиков
+
+# Команда /check_users – ручная проверка подписчиков (удаляет из базы тех, кто отписался или неактивен)
 @dp.message(Command("check_users"))
 async def check_users_command(message: types.Message):
     if message.from_user.id != ADMIN_ID:
@@ -215,7 +235,7 @@ async def check_users_command(message: types.Message):
             logging.info(f"Пользователь {user_id} соответствует условиям.")
     await message.reply(f"Проверка завершена. Удалено пользователей: {len(removed_users)}")
 
-# Команда /clean_group для чистки базы подписчиков по статусу в группе
+# Команда /clean_group – чистка базы подписчиков на основе статуса в группе
 @dp.message(Command("clean_group"))
 async def clean_group_command(message: types.Message):
     if message.from_user.id != ADMIN_ID:
@@ -246,7 +266,7 @@ async def clean_group_command(message: types.Message):
                 logging.error(f"Ошибка проверки участника {user_id}: {e}")
     await message.reply(f"Чистка завершена. Из базы удалено пользователей: {len(removed_users)}")
 
-# Команда /list_users для вывода списка подписчиков
+# Команда /list_users – вывод списка участников, которых бот видит (ограниченная реализация)
 @dp.message(Command("list_users"))
 async def list_users_command(message: types.Message):
     if message.from_user.id != ADMIN_ID:
@@ -261,8 +281,8 @@ async def list_users_command(message: types.Message):
     except Exception as e:
         logging.error(f"Ошибка при получении списка участников: {e}")
         await message.reply("Ошибка при получении списка участников.")
-# Функция ручной проверки подписчиков для автоматизации (без объекта message)
 
+# Функция ручной проверки без объекта message (для автопроверки)
 async def check_users_command_manual():
     subscribers_list = await load_subscribers_db()
     removed_users = []
@@ -289,7 +309,7 @@ async def check_users_command_manual():
     logging.info(f"Проверка завершена. Удалено пользователей: {len(removed_users)}")
     return len(removed_users)
 
-# Автоматическая проверка подписчиков каждые 4 часа
+# Автоматическая проверка подписчиков раз в 4 часа
 async def scheduled_check():
     removed_count = await check_users_command_manual()
     logging.info(f"Автоматическая проверка завершена. Удалено пользователей: {removed_count}")
@@ -299,39 +319,17 @@ async def start_cron():
     crontab("0 */4 * * *", func=scheduled_check, loop=loop)
     logging.info("Cron-задача scheduled_check зарегистрирована.")
 
-# Функции, вызываемые при старте и завершении работы веб-приложения
-async def on_startup(app: web.Application):
+# Главная функция запуска
+async def main():
     await database.connect()
-    await bot.set_webhook(WEBHOOK_URL)
+    # Запуск cron-задачи и polling
     asyncio.create_task(start_cron())
-    logging.info("Webhook установлен и cron-задача запущена.")
-
-async def on_shutdown(app: web.Application):
-    await bot.delete_webhook()
-    await database.disconnect()
-    logging.info("Webhook удален и база отключена.")
-
-async def webhook_handler(request: web.Request):
     try:
-        update_data = await request.json()
+        await dp.start_polling(bot, allowed_updates=["message", "channel_post", "callback_query"])
     except Exception as e:
-        logging.error(f"Ошибка получения JSON: {e}")
-        return web.Response(status=400)
-    
-    # Создаем объект Update из полученных данных
-    update = types.Update(**update_data)
-    # Обработка обновления
-    asyncio.create_task(dp.process_update(update))
-    return web.Response(text="OK", status=200)
+        logging.error(f"Ошибка при запуске бота: {e}")
+    finally:
+        await database.disconnect()
 
-# Создаем экземпляр приложения aiohttp
-app = web.Application()
-# Регистрируем маршрут для вебхуков
-app.router.add_post(WEBHOOK_PATH, webhook_handler)
-# Привязываем функции on_startup и on_shutdown
-app.on_startup.append(on_startup)
-app.on_shutdown.append(on_shutdown)
-
-if __name__ == '__main__':
-    web.run_app(app, host="0.0.0.0", port=8000)
-
+if __name__ == "__main__":
+    asyncio.run(main())
