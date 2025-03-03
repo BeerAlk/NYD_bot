@@ -6,7 +6,7 @@ from databases import Database
 DATABASE_URL = os.getenv("DATABASE_URL")
 if DATABASE_URL is None:
     # Локальное тестирование: укажите здесь URL подключения к вашей локальной базе, например:
-    DATABASE_URL = "postgresql+asyncpg://NYD_ADMIN:fg4xZ9H4vu@127.0.0.1:5432/subscribers"
+    DATABASE_URL = "mysql+aiomysql://NYD_ADMIN:fg4xZ9H4vu@127.0.0.1:3306/subscribers"
 
 # Инициализируем объект Database
 database = Database(DATABASE_URL)
